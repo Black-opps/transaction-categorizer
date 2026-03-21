@@ -3,7 +3,7 @@ Transaction categorizer service - core categorization logic.
 """
 import logging
 import time
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 from uuid import UUID
 from datetime import datetime
 
@@ -11,7 +11,6 @@ from ..models.transaction import (
     Transaction,
     CategorizedTransaction,
     Category,
-    CategorizationRequest,
     CategorizationResponse,
     CategorizationRule
 )

@@ -2,7 +2,6 @@
 FastAPI routes for transaction categorization.
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from typing import List
 from uuid import UUID
 
 from ..models.transaction import (

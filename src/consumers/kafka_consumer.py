@@ -1,13 +1,11 @@
 """
 Kafka consumer for processing transactions asynchronously.
 """
-import asyncio
 import json
 import logging
 from aiokafka import AIOKafkaConsumer
 
 from ..core.config import settings
-from ..core.database import SessionLocal
 from ..services.categorizer import TransactionCategorizer
 from ..models.transaction import Transaction
 
