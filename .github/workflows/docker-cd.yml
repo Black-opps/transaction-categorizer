@@ -1,0 +1,78 @@
+name: Docker CD - Build & Push
+
+on:
+  push:
+    branches:
+      - main
+
+  # Optional: allow manual trigger from GitHub UI
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # required to push to ghcr.io
+
+    steps:
+      # ────────────────────────────────────────────────
+      # Checkout code
+      # ────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ────────────────────────────────────────────────
+      # Extract metadata (tags, labels) for Docker
+      # ────────────────────────────────────────────────
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,enable=true
+
+      # ────────────────────────────────────────────────
+      # Set up Docker Buildx (supports multi-platform)
+      # ────────────────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ────────────────────────────────────────────────
+      # Login to GitHub Container Registry
+      # ────────────────────────────────────────────────
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ────────────────────────────────────────────────
+      # Build & push image
+      # ────────────────────────────────────────────────
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64 # add linux/arm64 later if needed
+
+
+      # ────────────────────────────────────────────────
+      # (Optional) Notify on success/failure via Slack/Discord
+      # ────────────────────────────────────────────────
+      # - name: Notify Slack on failure
+      #   if: failure()
+      #   uses: slackapi/slack-github-action@v1.26.0
+      #   with:
+      #     payload: '{"text": "Docker build failed for transaction-categorizer :x:"}'
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
