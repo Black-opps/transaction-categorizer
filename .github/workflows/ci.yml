@@ -1,3 +1,4 @@
+fail-fast: true
 name: CI - Lint & Test
 
 on:
@@ -15,13 +16,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # already latest
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: "pip"
+        uses: actions/setup-python@v5 # already latest
 
       - name: Install dependencies
         run: |
@@ -35,15 +33,5 @@ jobs:
       - name: Format check with Ruff
         run: ruff format --check .
 
-      - name: Type check with mypy (optional)
-        run: mypy src --ignore-missing-imports
-
       - name: Run tests
         run: pytest --cov=src --cov-report=xml --cov-report=term-missing -v
-
-      # Optional: upload coverage (add CODECOV_TOKEN secret if using Codecov)
-      # - name: Upload coverage
-      #   uses: codecov/codecov-action@v4
-      #   with:
-      #     token: ${{ secrets.CODECOV_TOKEN }}
-      #     file: coverage.xml

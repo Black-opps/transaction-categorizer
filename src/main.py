@@ -1,122 +1,82 @@
 """
-Main FastAPI application entry point.
+Transaction Categorizer Microservice - Main entry point.
 """
-
-import logging
-import socket
-from datetime import datetime
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+import asyncio
+import logging
 
-from .api.routes import router
 from .core.config import settings
+from .core.database import init_db
+from .api.routes import router
+from .consumers.kafka_consumer import consumer
 
-# ────────────────────────────────────────────────
-# Logging
-# ────────────────────────────────────────────────
+# Configure logging
 logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper()),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=getattr(logging, settings.LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger("app")
+# Initialize database
+init_db()
+logger.info("Database initialized")
 
-# ────────────────────────────────────────────────
-# Lifespan
-# ────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator:
-    logger.info(
-        "Service starting",
-        extra={
-            "service": settings.APP_NAME,
-            "env": settings.ENVIRONMENT,
-        },
-    )
-
-    yield
-
-    logger.info("Service shutting down")
-
-
-# ────────────────────────────────────────────────
-# App
-# ────────────────────────────────────────────────
+# Create FastAPI app
 app = FastAPI(
-    title=settings.APP_NAME,
-    version=settings.APP_VERSION,
-    docs_url="/api/docs" if settings.ENVIRONMENT != "production" else None,
-    lifespan=lifespan,
+    title="Transaction Categorizer Service",
+    description="ML-powered transaction categorization for M-PESA transactions",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# CORS
+# Add CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Routes
+# Include routers
 app.include_router(router)
 
-# ────────────────────────────────────────────────
-# Root
-# ────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup_event():
+    """Start Kafka consumer on app startup."""
+    logger.info("Starting Transaction Categorizer Service...")
+    asyncio.create_task(consumer.start())
+    logger.info("Kafka consumer started")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop Kafka consumer on app shutdown."""
+    logger.info("Shutting down...")
+    await consumer.stop()
+
+
 @app.get("/")
-def root():
+async def root():
+    """Root endpoint."""
     return {
-        "service": settings.APP_NAME,
-        "version": settings.APP_VERSION,
+        "name": "Transaction Categorizer Service",
+        "version": "1.0.0",
+        "status": "operational",
         "environment": settings.ENVIRONMENT,
-        "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
-        "instance": socket.gethostname(),
-        "dependencies": {
-            "redis": "configured" if settings.REDIS_URL else "not_configured",
-            "kafka": "configured" if settings.KAFKA_BOOTSTRAP_SERVERS else "not_configured",
-        },
-        "docs": f"{settings.API_BASE_URL}api/docs"
-        if settings.ENVIRONMENT != "production"
-        else None,
+        "docs": "/docs",
+        "health": "/health"
     }
 
 
-# ────────────────────────────────────────────────
-# Health
-# ────────────────────────────────────────────────
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-# ────────────────────────────────────────────────
-# Debug Config
-# ────────────────────────────────────────────────
-@app.get("/debug/config")
-def debug_config():
-    return {
-        "environment": settings.ENVIRONMENT,
-        "debug": settings.DEBUG,
-        "redis": bool(settings.REDIS_URL),
-        "kafka": bool(settings.KAFKA_BOOTSTRAP_SERVERS),
-    }
-
-
-# ────────────────────────────────────────────────
-# Global Exception Handler
-# ────────────────────────────────────────────────
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc: Exception):
-    logger.error("Unhandled exception", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error"},
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=settings.API_PORT,
+        reload=settings.DEBUG
     )
