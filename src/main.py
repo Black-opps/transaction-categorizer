@@ -58,6 +58,9 @@ async def shutdown_event():
     logger.info("Shutting down...")
     await consumer.stop()
 
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "categorizer-service"}
 
 @app.get("/")
 async def root():
@@ -79,4 +82,9 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=settings.API_PORT,
         reload=settings.DEBUG
-    )
+    )@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "categorizer-service"}
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "categorizer-service"}
