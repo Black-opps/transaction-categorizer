@@ -1,134 +1,169 @@
-"""
-Transaction categorization service.
-"""
-import logging
-from typing import List, Dict, Any
-from datetime import datetime
-from uuid import uuid4
+# src/services/categorizer.py
+import time
+from typing import Dict, List
 
-from .rules import get_default_engine, Category
-from ..core.database import SessionLocal, CategorizedTransaction
-
-logger = logging.getLogger(__name__)
+import httpx
+from sqlalchemy.orm import Session
+from src.core.database import CategorizedTransaction as DBCategorizedTransaction
+from src.core.database import CategoryRule
+from src.models.transaction import CategorizedTransaction, Category, Transaction
+from src.services.rules import MpesaRuleEngine
 
 
-class TransactionCategorizer:
-    """Main transaction categorization service."""
-    
-    def __init__(self, rule_engine=None):
-        self.rule_engine = rule_engine or get_default_engine()
-        self.db = SessionLocal()
-    
-    def __del__(self):
-        if hasattr(self, 'db') and self.db:
-            self.db.close()
-    
-    def categorize_transaction(self, transaction: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Categorize a single transaction.
-        """
+class CategorizerService:
+    """Main categorizer service with M-PESA specific logic."""
 
-        description = transaction.get("description", "")
-        amount = float(transaction.get("amount", 0))
-        transaction_type = transaction.get("transaction_type", "expense")
-        tenant_id = transaction.get("tenant_id", "unknown")
+    def __init__(self, db: Session):
+        self.db = db
+        self.rule_engine = MpesaRuleEngine()
+        self.last_processing_time_ms = 0
 
-        # Categorize using rules engine
-        category, confidence, matched_rules = self.rule_engine.categorize(description)
+    async def categorize_batch(
+        self, tenant_id: str, transactions: List[Transaction]
+    ) -> List[CategorizedTransaction]:
+        """Categorize a batch of transactions."""
 
-        if transaction_type == "income" and category == Category.OTHER.value:
-            category = Category.REVENUE.value
-            confidence = 0.7
+        start_time = time.time()
+        categorized = []
 
-        # Parse transaction date safely
-        tx_date = transaction.get("transaction_date")
+        for tx in transactions:
+            cat_tx = await self.categorize_single(tenant_id, tx)
+            categorized.append(cat_tx)
 
-        try:
-            parsed_date = datetime.fromisoformat(tx_date.replace("Z", "+00:00"))
-        except Exception:
-            parsed_date = datetime.utcnow()
-
-        # Generate ID if missing
-        tx_id = transaction.get("id") or str(uuid4())
-
-        categorized = {
-            "id": tx_id,
-            "tenant_id": tenant_id,
-            "original_description": description,
-            "amount": amount,
-            "transaction_type": transaction_type,
-            "transaction_date": parsed_date.isoformat(),
-            "category": category,
-            "confidence": confidence,
-            "rules_applied": matched_rules,
-            "processed_at": datetime.utcnow().isoformat(),
-        }
-
-        # Save to DB safely
-        try:
-            db_record = CategorizedTransaction(
-                id=tx_id,
+            # Store in database
+            db_tx = DBCategorizedTransaction(
                 tenant_id=tenant_id,
-                original_description=description,
-                amount=amount,
-                transaction_type=transaction_type,
-                transaction_date=parsed_date,
-                category=category,
-                confidence=confidence,
-                rules_applied=",".join(matched_rules),  # store as string
-                phone_number=transaction.get("phone_number"),
-                reference=transaction.get("reference"),
-                processed_at=datetime.utcnow(),
+                original_description=tx.description,
+                amount=tx.amount,
+                transaction_type=tx.transaction_type.value,
+                transaction_date=tx.transaction_date,
+                category=cat_tx.category.value,
+                confidence=cat_tx.confidence,
+                rules_applied=",".join(cat_tx.category_rules_applied),
+                phone_number=tx.phone_number,
+                reference=tx.reference,
             )
+            self.db.add(db_tx)
 
-            self.db.add(db_record)
-            self.db.commit()
-
-        except Exception as e:
-            logger.error(f"DB insert failed: {e}")
-            self.db.rollback()
-
-        logger.info(f"Categorized: {description[:50]} -> {category}")
+        self.db.commit()
+        self.last_processing_time_ms = (time.time() - start_time) * 1000
 
         return categorized
-    
-    def categorize_batch(self, transactions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Categorize a batch of transactions."""
-        results = []
-        for tx in transactions:
-            try:
-                result = self.categorize_transaction(tx)
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Failed to categorize: {e}")
-                results.append({
-                    **tx,
-                    "category": "Error",
-                    "confidence": 0,
-                    "error": str(e)
-                })
-        return results
-    
-    def get_stats(self, tenant_id: str = None) -> Dict[str, Any]:
-        """Get categorization statistics."""
-        query = self.db.query(CategorizedTransaction)
-        if tenant_id:
-            query = query.filter(CategorizedTransaction.tenant_id == tenant_id)
-        
-        total = query.count()
-        
-        from sqlalchemy import func
-        category_breakdown = {}
-        results = query.with_entities(
-            CategorizedTransaction.category, 
-            func.count(CategorizedTransaction.id)
-        ).group_by(CategorizedTransaction.category).all()
-        
-        for category, count in results:
-            category_breakdown[category] = count
-        
+
+    async def categorize_single(
+        self, tenant_id: str, transaction: Transaction
+    ) -> CategorizedTransaction:
+        """Categorize a single transaction."""
+
+        # First check custom tenant rules
+        custom_rules = (
+            self.db.query(CategoryRule)
+            .filter(CategoryRule.tenant_id == tenant_id, CategoryRule.is_active == True)
+            .order_by(CategoryRule.priority.desc())
+            .all()
+        )
+
+        for rule in custom_rules:
+            import re
+
+            if re.search(rule.pattern, transaction.description, re.IGNORECASE):
+                return CategorizedTransaction(
+                    tenant_id=tenant_id,
+                    **transaction.dict(),
+                    category=Category(rule.category),
+                    confidence=rule.confidence,
+                    category_rules_applied=[rule.name],
+                )
+
+        # Use M-PESA rule engine
+        category, confidence, matched_rules = self.rule_engine.categorize(
+            transaction.description,
+            transaction.amount,
+            transaction.transaction_type.value,
+        )
+
+        # Map string category to enum
+        category_enum = Category.OTHER
+        for c in Category:
+            if c.value == category:
+                category_enum = c
+                break
+
+        return CategorizedTransaction(
+            tenant_id=tenant_id,
+            **transaction.dict(),
+            category=category_enum,
+            confidence=confidence,
+            category_rules_applied=matched_rules,
+        )
+
+    async def update_transaction_service(
+        self, tenant_id: str, categorized_transactions: List[CategorizedTransaction]
+    ):
+        """Update Transaction Service with categories."""
+
+        async with httpx.AsyncClient() as client:
+            for tx in categorized_transactions:
+                await client.patch(
+                    f"http://localhost:8006/api/v1/transactions/{tx.id}",
+                    json={
+                        "category": tx.category.value,
+                        "confidence": tx.confidence,
+                        "categorized_at": tx.categorized_at.isoformat(),
+                    },
+                    headers={"X-Tenant-ID": tenant_id},
+                )
+
+    def get_stats(self, categorized: List[CategorizedTransaction]) -> Dict[str, int]:
+        """Get statistics for categorized batch."""
+        stats = {}
+        for cat in categorized:
+            cat_name = cat.category.value
+            stats[cat_name] = stats.get(cat_name, 0) + 1
+        return stats
+
+    async def get_rules(self, tenant_id: str) -> List[Dict]:
+        """Get rules for a tenant."""
+        rules = (
+            self.db.query(CategoryRule)
+            .filter(CategoryRule.tenant_id == tenant_id)
+            .all()
+        )
+
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "pattern": r.pattern,
+                "category": r.category,
+                "confidence": r.confidence,
+                "priority": r.priority,
+                "is_active": r.is_active,
+            }
+            for r in rules
+        ]
+
+    async def create_rule(self, tenant_id: str, rule: dict) -> Dict:
+        """Create a custom rule for a tenant."""
+        db_rule = CategoryRule(
+            tenant_id=tenant_id,
+            name=rule.get("name"),
+            pattern=rule.get("pattern"),
+            category=rule.get("category"),
+            confidence=rule.get("confidence", 0.9),
+            priority=rule.get("priority", 0),
+            is_active=rule.get("is_active", True),
+        )
+        self.db.add(db_rule)
+        self.db.commit()
+        self.db.refresh(db_rule)
+
         return {
-            "total_transactions": total,
-            "category_breakdown": category_breakdown,
-            "unique_tenants": self.db.query(CategorizedTransaction.tenant_id).distinct().count()
+            "id": db_rule.id,
+            "name": db_rule.name,
+            "pattern": db_rule.pattern,
+            "category": db_rule.category,
+            "confidence": db_rule.confidence,
+            "priority": db_rule.priority,
+            "is_active": db_rule.is_active,
         }

@@ -1,6 +1,6 @@
 ﻿"""
-Transaction Categorizer Microservice
-
-This package contains the API routes, consumers, services and models
-for categorizing parsed M-PESA transactions.
+Transaction Categorizer Service
 """
+
+__version__ = "1.0.0"
+__author__ = "M-PESA Platform Team"

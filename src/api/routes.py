@@ -1,159 +1,55 @@
-﻿"""
-API routes for transaction categorizer.
-"""
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from typing import List, Optional
-from pydantic import BaseModel
-from datetime import datetime
-from uuid import UUID
+﻿# src/api/routes.py
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from sqlalchemy.orm import Session
+from src.core.database import get_db
+from src.models.transaction import CategorizationRequest, CategorizationResponse
+from src.services.categorizer import CategorizerService
 
-from ..services.categorizer import TransactionCategorizer
-from ..services.rules import DEFAULT_RULES
-
-router = APIRouter(prefix="/api/v1/categorize", tags=["Transaction Categorization"])
+router = APIRouter(prefix="/api/v1/categorizer", tags=["categorization"])
 
 
-# Request Models
-class Transaction(BaseModel):
-    id: Optional[str] = None
-    tenant_id: str
-    amount: float
-    description: str
-    transaction_type: str = "expense"
-    transaction_date: str
-    phone_number: Optional[str] = None
-    reference: Optional[str] = None
-
-
-class CategorizeRequest(BaseModel):
-    transactions: List[Transaction]
-
-
-# Response Models
-class CategorizedTransaction(BaseModel):
-    id: str
-    tenant_id: str
-    original_description: str
-    amount: float
-    transaction_type: str
-    transaction_date: str
-    category: str
-    confidence: float
-    rules_applied: List[str]
-    processed_at: str
-
-
-class CategorizeResponse(BaseModel):
-    categorized_transactions: List[CategorizedTransaction]
-    stats: dict
-    processing_time_ms: float
-
-
-@router.post("/", response_model=CategorizeResponse)
-async def categorize_transactions(request: CategorizeRequest):
+@router.post("/categorize", response_model=CategorizationResponse)
+async def categorize_transactions(
+    request: CategorizationRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     """
     Categorize a batch of transactions.
+    Called by Transaction Service after ingestion.
     """
-    import time
+    service = CategorizerService(db)
 
-    start_time = time.time()
+    # Categorize
+    categorized = await service.categorize_batch(
+        tenant_id=request.tenant_id, transactions=request.transactions
+    )
 
-    categorizer = TransactionCategorizer()
+    # Update Transaction Service in background
+    background_tasks.add_task(
+        service.update_transaction_service,
+        tenant_id=request.tenant_id,
+        categorized_transactions=categorized,
+    )
 
-    transactions = [tx.dict() for tx in request.transactions]
-
-    results = categorizer.categorize_batch(transactions)
-
-    stats = {}
-
-    for result in results:
-        category = result.get("category", "Other")
-        stats[category] = stats.get(category, 0) + 1
-
-    processing_time = (time.time() - start_time) * 1000
-
-    return CategorizeResponse(
-        categorized_transactions=results,
-        stats=stats,
-        processing_time_ms=round(processing_time, 2),
+    return CategorizationResponse(
+        categorized_transactions=categorized,
+        stats=service.get_stats(categorized),
+        processing_time_ms=service.last_processing_time_ms,
     )
 
 
-@router.post("/single", response_model=CategorizedTransaction)
-async def categorize_single(transaction: Transaction):
-    """
-    Categorize a single transaction.
-    """
-    categorizer = TransactionCategorizer()
-
-    try:
-        result = categorizer.categorize_transaction(transaction.dict())
-        return result
-
-    except Exception as e:
-        print("Categorization error:", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get("/rules")
-async def list_rules():
-    """
-    List all active categorization rules.
-    """
-    rules = [
-        {
-            "name": r.name,
-            "pattern": r.pattern,
-            "category": r.category,
-            "confidence": r.confidence,
-            "priority": r.priority,
-        }
-        for r in DEFAULT_RULES
-    ]
-
-    return {"rules": rules, "count": len(rules)}
+async def get_rules(tenant_id: str, db: Session = Depends(get_db)):
+    """Get categorization rules for a tenant."""
+    service = CategorizerService(db)
+    return await service.get_rules(tenant_id)
 
 
-@router.get("/stats")
-async def get_stats(tenant_id: Optional[str] = None):
-    """
-    Get categorization statistics.
-    """
-    categorizer = TransactionCategorizer()
-
-    return categorizer.get_stats(tenant_id)
-
-
-@router.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "service": "transaction-categorizer",
-        "version": "1.0.0",
-    }
-
-
-@router.get("/ping")
-async def ping():
-    """Simple ping endpoint."""
-    return {"status": "ok", "message": "Service is running"}
-
-
-@router.get("/")
-async def root():
-    """Root endpoint."""
-    return {
-        "name": "Transaction Categorizer Service",
-        "version": "1.0.0",
-        "description": "ML-powered transaction categorization",
-        "categories": [
-            "Revenue",
-            "Inventory",
-            "Rent",
-            "Salaries",
-            "Transport",
-            "Utilities",
-            "Other",
-        ],
-    }
+@router.post("/rules")
+async def create_rule(
+    rule: CategorizationRule, tenant_id: str, db: Session = Depends(get_db)
+):
+    """Create a custom categorization rule for a tenant."""
+    service = CategorizerService(db)
+    return await service.create_rule(tenant_id, rule)
