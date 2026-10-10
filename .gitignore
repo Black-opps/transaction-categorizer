@@ -1,25 +1,26 @@
-﻿# Python virtual environment
+﻿# Python
 venv/
 env/
 ENV/
-
-# Python cache
 __pycache__/
 *.py[cod]
 *.so
 .python/
 
-# Database files
+# Database
 *.db
 *.sqlite
 *.sqlite3
 
-# Environment variables
+# Environment
 .env
 .env.local
 .env.*.local
 .env.production
-.env.example
+.env.prod
+.env.dev
+.env.staging
+.env.test
 
 # IDE
 .vscode/
@@ -39,11 +40,11 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Secrets (CRITICAL!)
-*.pem
-*.key
-*.crt
-
 # Uploads
 uploads/
 temp/
+
+# Secrets
+*.pem
+*.key
+*.crt
